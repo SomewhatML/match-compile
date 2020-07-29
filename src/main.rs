@@ -19,6 +19,8 @@ fn simulate_db(constructor: &str) -> bool {
     match constructor {
         "nil" => false,
         "cons" => true,
+        "t" => false,
+        "f" => false,
         _ => panic!("something has gone horribly wrong"),
     }
 }
@@ -121,6 +123,51 @@ fn example() -> Expr {
         ],
     )
 }
+/// example2
+/// match x, y, z with
+///     | _, F, T => 1
+///     | F, T, _ => 2
+///     | _, _, F => 3
+///     | _, _, T => 4
+fn example2() -> Expr {
+    Expr::Case(
+        Box::new(Expr::Var("args".into())),
+        vec![
+            (
+                APat::Record(vec![
+                    ("0".into(), APat::Wild),
+                    ("1".into(), APat::App("f".into(), None)),
+                    ("2".into(), APat::App("t".into(), None)),
+                ]),
+                Expr::Int(1),
+            ),
+            (
+                APat::Record(vec![
+                    ("0".into(), APat::App("f".into(), None)),
+                    ("1".into(), APat::App("t".into(), None)),
+                    ("2".into(), APat::Wild),
+                ]),
+                Expr::Int(2),
+            ),
+            (
+                APat::Record(vec![
+                    ("0".into(), APat::Wild),
+                    ("1".into(), APat::Wild),
+                    ("2".into(), APat::App("f".into(), None)),
+                ]),
+                Expr::Int(3),
+            ),
+            (
+                APat::Record(vec![
+                    ("0".into(), APat::Wild),
+                    ("1".into(), APat::Wild),
+                    ("2".into(), APat::App("t".into(), None)),
+                ]),
+                Expr::Int(4),
+            ),
+        ],
+    )
+}
 
 #[derive(Default)]
 pub struct Matrix {
@@ -207,8 +254,9 @@ impl Matrix {
         if !arity {
             mat.vars.remove(0);
         }
-        println!("specialize rule {} {:?}\n{:?}", head, self, mat);
-
+        // let e = mat.compile();
+        // println!("specialize rule {} {:?}\n{:?}", head, self, mat);
+        // e
         mat.compile()
     }
 
@@ -226,12 +274,13 @@ impl Matrix {
                 _ => unreachable!(),
             }
         }
-        let exhaustive = wild || set.len() == 2;
+        let exhaustive = set.len() == 2;
         // println!("sum rule {:?}", self);
         let mut rules = Vec::new();
         for con in set {
             let arity = simulate_db(con);
             let branch = self.specialize(con, arity);
+            println!("spec {} {} {:?} ({})", con, exhaustive, self, branch);
             if arity {
                 rules.push((APat::App(con.into(), Some(Box::new(APat::Wild))), branch));
             } else {
@@ -260,7 +309,7 @@ impl Matrix {
         mat.compile()
     }
 
-    pub fn compile(&self) -> Expr {
+    pub fn compile(&mut self) -> Expr {
         // dbg!(&self);
         if self.pats.is_empty() {
             Expr::Fail
@@ -275,18 +324,41 @@ impl Matrix {
                     _ => continue,
                 }
             }
-            self.default_matrix()
+            //     self.default_matrix()
+            // }
+
+            let sz = self.pats[0].len();
+
+            let mut col = 1;
+            'outer: while col < sz {
+                for row in &self.pats {
+                    match row.get(col) {
+                        Some(Pat::Wild) => continue,
+                        _ => break 'outer,
+                    }
+                }
+                col += 1;
+            }
+
+            if col < sz {
+                for row in self.pats.iter_mut() {
+                    row.swap(0, col);
+                }
+                self.compile()
+            } else {
+                self.default_matrix()
+            }
         }
     }
 }
 
 fn main() {
     println!("Hello, world!");
-    let ex = example();
+    let ex = example2();
     println!("init {}", ex);
     let e = if let Expr::Case(e, rules) = ex {
-        let mat = Matrix::build("x".into(), rules);
-        Expr::Let(APat::Var("x".into()), e, Box::new(mat.compile()))
+        let mut mat = Matrix::build("x".into(), rules);
+        mat.compile()
     } else {
         panic!()
     };
@@ -307,7 +379,8 @@ impl fmt::Debug for Matrix {
                 exprs
             )?;
         }
-        write!(f, "")
+        // write!(f, "")
+        Ok(())
     }
 }
 
