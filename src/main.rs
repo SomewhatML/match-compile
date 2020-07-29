@@ -232,7 +232,11 @@ impl Matrix {
         for con in set {
             let arity = simulate_db(con);
             let branch = self.specialize(con, arity);
-            rules.push((APat::App(con.into(), Some(Box::new(APat::Wild))), branch));
+            if arity {
+                rules.push((APat::App(con.into(), Some(Box::new(APat::Wild))), branch));
+            } else {
+                rules.push((APat::App(con.into(), None), branch));
+            }
             // println!("branch {} = {:?}", con, branch);
         }
         if !exhaustive {
