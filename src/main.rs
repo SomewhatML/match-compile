@@ -1,30 +1,11 @@
-use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
+//! A simplified source-to-source pattern match compiler, derived from
+//! Luc Maranget's "Compiling Pattern Matching to Good Decision Trees"
+
+use std::collections::HashSet;
 use std::fmt;
+mod util;
 
-thread_local! {
-    pub static COUNTER: Cell<usize> = Cell::new(0);
-}
-
-fn fresh() -> String {
-    let c = COUNTER.with(|c| {
-        let n = c.get();
-        c.set(n + 1);
-        n
-    });
-    format!("$x{}", c)
-}
-
-fn simulate_db(constructor: &str) -> bool {
-    match constructor {
-        "nil" => false,
-        "cons" => true,
-        "t" => false,
-        "f" => false,
-        _ => panic!("something has gone horribly wrong"),
-    }
-}
-
+/// A pattern as represented in the AST
 #[derive(Clone, Debug, PartialEq)]
 pub enum APat {
     Wild,
@@ -33,6 +14,7 @@ pub enum APat {
     App(String, Option<Box<APat>>),
 }
 
+/// Simplified pattern, without variable bindings
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Pat {
     Wild,
@@ -40,133 +22,19 @@ pub enum Pat {
     App(String, Option<Box<Pat>>),
 }
 
-impl From<APat> for Pat {
-    fn from(other: APat) -> Self {
-        match other {
-            APat::Wild | APat::Var(_) => Pat::Wild,
-            APat::Record(fields) => {
-                Pat::Record(fields.into_iter().map(|(s, p)| (s, p.into())).collect())
-            }
-            APat::App(s, c) => Pat::App(s, c.map(|p| Box::new(Pat::from(*p)))),
-        }
-    }
-}
-
-impl From<Pat> for APat {
-    fn from(other: Pat) -> Self {
-        match other {
-            Pat::Wild => APat::Wild,
-            Pat::Record(fields) => {
-                APat::Record(fields.into_iter().map(|(s, p)| (s, p.into())).collect())
-            }
-            Pat::App(s, c) => APat::App(s, c.map(|p| Box::new(APat::from(*p)))),
-        }
-    }
-}
-
+/// An expression from the AST
 #[derive(Clone, Debug, PartialEq)]
 pub enum Expr {
+    /// `case expr of | apat => expr, ...`
     Case(Box<Expr>, Vec<(APat, Expr)>),
+    /// Record or tuple
     Record(Vec<(String, Expr)>),
+    /// `let val APat = Expr in Expr end`
     Let(APat, Box<Expr>, Box<Expr>),
     Var(String),
     Int(i64),
+    /// `raise Match`
     Fail,
-}
-
-/// fun merge [] x = 1
-///   | merge x [] = 1
-///   | merge (x::xs) y = 2
-fn example() -> Expr {
-    Expr::Case(
-        Box::new(Expr::Var("args".into())),
-        vec![
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::App("nil".into(), None)),
-                    ("1".into(), APat::Var("y".into())),
-                ]),
-                Expr::Int(1),
-            ),
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::Var("x".into())),
-                    ("1".into(), APat::App("nil".into(), None)),
-                ]),
-                Expr::Int(2),
-            ),
-            (
-                APat::Record(vec![
-                    (
-                        "0".into(),
-                        APat::App(
-                            "cons".into(),
-                            Some(Box::new(APat::Record(vec![
-                                ("0".into(), APat::Var("x".into())),
-                                ("1".into(), APat::Var("xs".into())),
-                            ]))),
-                        ),
-                    ),
-                    (
-                        "1".into(),
-                        APat::App(
-                            "cons".into(),
-                            Some(Box::new(APat::Record(vec![
-                                ("0".into(), APat::Var("y".into())),
-                                ("1".into(), APat::Var("ys".into())),
-                            ]))),
-                        ),
-                    ),
-                ]),
-                Expr::Int(3),
-            ),
-        ],
-    )
-}
-/// example2
-/// match x, y, z with
-///     | _, F, T => 1
-///     | F, T, _ => 2
-///     | _, _, F => 3
-///     | _, _, T => 4
-fn example2() -> Expr {
-    Expr::Case(
-        Box::new(Expr::Var("args".into())),
-        vec![
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::Wild),
-                    ("1".into(), APat::App("f".into(), None)),
-                    ("2".into(), APat::App("t".into(), None)),
-                ]),
-                Expr::Int(1),
-            ),
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::App("f".into(), None)),
-                    ("1".into(), APat::App("t".into(), None)),
-                    ("2".into(), APat::Wild),
-                ]),
-                Expr::Int(2),
-            ),
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::Wild),
-                    ("1".into(), APat::Wild),
-                    ("2".into(), APat::App("f".into(), None)),
-                ]),
-                Expr::Int(3),
-            ),
-            (
-                APat::Record(vec![
-                    ("0".into(), APat::Wild),
-                    ("1".into(), APat::Wild),
-                    ("2".into(), APat::App("t".into(), None)),
-                ]),
-                Expr::Int(4),
-            ),
-        ],
-    )
 }
 
 #[derive(Default)]
@@ -178,6 +46,15 @@ pub struct Matrix {
 }
 
 impl Matrix {
+    /// Build a new pattern matrix.
+    ///
+    /// # Invariants:
+    ///
+    /// * Type safety - the case expression that is being transformed
+    ///     should have been previously verified to be well typed
+    /// * Following #1, all patterns should have the same width, etc
+    /// * `arg` should be a fresh variable of the same type of the
+    ///     match rules
     pub fn build(arg: String, rules: Vec<(APat, Expr)>) -> Matrix {
         let mut mat = Matrix::default();
         mat.vars = vec![arg];
@@ -188,12 +65,12 @@ impl Matrix {
         mat
     }
 
-    pub fn variable_rule(&self) -> Expr {
-        self.exprs[0].clone()
-    }
-
-    pub fn record_rule(&self, fields: &[(String, Pat)]) -> Expr {
-        // let val {x, y, z} = a in case (x, y, z) of ... end
+    /// Deconstruct a record or tuple pattern, binding each field to a fresh
+    /// variable, and flattening all of the record patterns in the first column
+    /// [{a, b, c}, ...] --> [a, b, c, ...]
+    fn record_rule(&self, fields: &[(String, Pat)]) -> Expr {
+        // This part is a little tricky. We need to generate a fresh variable
+        // for every field in the pattern
         let mut vars = self.vars.clone();
         let base = vars.remove(0);
         let pat = APat::Record(
@@ -201,7 +78,7 @@ impl Matrix {
                 .iter()
                 .enumerate()
                 .map(|(idx, (s, _))| {
-                    let f = fresh();
+                    let f = util::fresh();
                     vars.insert(idx, f.clone());
                     (s.clone(), APat::Var(f))
                 })
@@ -216,6 +93,8 @@ impl Matrix {
                     new_row.insert(idx, pat.clone());
                 }
             } else {
+                // If we have a wildcard pattern, generate enough wildcards to
+                // subsume every field in the record
                 for idx in 0..fields.len() {
                     new_row.insert(idx, Pat::Wild);
                 }
@@ -225,12 +104,14 @@ impl Matrix {
             mat.pats.push(new_row);
         }
         mat.vars = vars;
-
-        // dbg!(&mat);
+        // We now have `let val ($x0, $x1... fresh vars) = x in case [$x0, $x1...]
         Expr::Let(pat, Box::new(Expr::Var(base)), Box::new(mat.compile()))
     }
 
-    pub fn specialize(&self, head: &str, arity: bool) -> Expr {
+    /// This is basically the same thing as the record rule, but for data
+    /// constructors. We want to select all of the rows in the first column
+    /// that will match the constructor `head` (e.g. `head` itself, and wildcard)
+    fn specialize(&self, head: &str, arity: bool) -> Expr {
         let mut mat = Matrix::default();
         for (idx, row) in self.pats.iter().enumerate() {
             let mut new_row: Vec<Pat> = row.iter().skip(1).cloned().collect();
@@ -246,7 +127,6 @@ impl Matrix {
                 }
                 _ => continue,
             }
-
             mat.exprs.push(self.exprs[idx].clone());
             mat.pats.push(new_row);
         }
@@ -254,47 +134,48 @@ impl Matrix {
         if !arity {
             mat.vars.remove(0);
         }
-        // let e = mat.compile();
-        // println!("specialize rule {} {:?}\n{:?}", head, self, mat);
-        // e
+        // do we need to mess with mat.vars more?
         mat.compile()
     }
 
-    pub fn sum_rule(&self) -> Expr {
+    /// Generate a case expression for the data constructors in the first column
+    fn sum_rule(&self) -> Expr {
+        // Generate the set of constructors appearing in the column
         let mut set = HashSet::new();
-        let mut wild = false;
         for row in &self.pats {
-            match &row[0] {
-                Pat::App(con, _) => {
-                    set.insert(con);
-                }
-                Pat::Wild => {
-                    wild = true;
-                }
-                _ => unreachable!(),
+            if let Pat::App(con, _) = &row[0] {
+                set.insert(con);
             }
         }
+
+        // We only use `true` and `false` or `cons` and `nil`, so we know
+        // there are only 2 constructors in each datatype. Otherwise we
+        // would need to query a context to determine this
         let exhaustive = set.len() == 2;
-        // println!("sum rule {:?}", self);
+
         let mut rules = Vec::new();
         for con in set {
-            let arity = simulate_db(con);
+            // In a real system, we would have some context to pull the number
+            // of data constructors for a datatype, and the arity of each
+            // data constructor. We just mock it instead
+            let arity = util::simulate_db(con);
             let branch = self.specialize(con, arity);
-            println!("spec {} {} {:?} ({})", con, exhaustive, self, branch);
-            if arity {
-                rules.push((APat::App(con.into(), Some(Box::new(APat::Wild))), branch));
-            } else {
-                rules.push((APat::App(con.into(), None), branch));
-            }
-            // println!("branch {} = {:?}", con, branch);
+
+            let arg = match arity {
+                true => Some(Box::new(APat::Wild)),
+                false => None,
+            };
+            rules.push((APat::App(con.into(), arg), branch));
         }
+
+        // If we don't have an exhaustive match, generate a default matrix
         if !exhaustive {
             rules.push((APat::Wild, self.default_matrix()));
         }
         Expr::Case(Box::new(Expr::Var(self.vars[0].clone())), rules)
-        // todo!()
     }
 
+    /// Compute the "default" matrix
     fn default_matrix(&self) -> Expr {
         let mut mat = Matrix::default();
         mat.vars = self.vars.clone();
@@ -309,14 +190,17 @@ impl Matrix {
         mat.compile()
     }
 
+    /// Compile a [`Matrix`] into a source-level expression
     pub fn compile(&mut self) -> Expr {
-        // dbg!(&self);
         if self.pats.is_empty() {
+            // We have an in-exhaustive case expression
             Expr::Fail
         } else if self.pats[0].iter().all(|p| p == &Pat::Wild) {
-            self.variable_rule()
+            // Every pattern in the first row is a variable or wildcard,
+            // so the it matches. return the body of the match rule
+            self.exprs[0].clone()
         } else {
-            // There is at least one non-wild pattern in the first row
+            // There is at least one non-wild pattern in the matrix somewhere
             for row in &self.pats {
                 match &row[0] {
                     Pat::Record(fields) => return self.record_rule(fields),
@@ -324,11 +208,11 @@ impl Matrix {
                     _ => continue,
                 }
             }
-            //     self.default_matrix()
-            // }
 
+            // The first column contains only wildcard patterns. Search the
+            // matrix until we find a column that has a non-wildcard pattern,
+            // and swap columns with column 0
             let sz = self.pats[0].len();
-
             let mut col = 1;
             'outer: while col < sz {
                 for row in &self.pats {
@@ -353,83 +237,13 @@ impl Matrix {
 }
 
 fn main() {
-    println!("Hello, world!");
-    let ex = example2();
+    let ex = util::example2();
     println!("init {}", ex);
-    let e = if let Expr::Case(e, rules) = ex {
+    let e = if let Expr::Case(ex, rules) = ex {
         let mut mat = Matrix::build("x".into(), rules);
         mat.compile()
     } else {
         panic!()
     };
     println!("final {}", e);
-}
-
-impl fmt::Debug for Matrix {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "matrix {:?}\n", self.vars)?;
-        for (pats, exprs) in self.pats.iter().zip(self.exprs.iter()) {
-            writeln!(
-                f,
-                "{} => {}",
-                pats.iter()
-                    .map(|pat| format!("{}", APat::from(pat.clone())))
-                    .collect::<Vec<String>>()
-                    .join(","),
-                exprs
-            )?;
-        }
-        // write!(f, "")
-        Ok(())
-    }
-}
-
-impl fmt::Display for APat {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            APat::Wild => write!(f, "_"),
-            APat::Var(s) => write!(f, "{}", s),
-            APat::App(c, Some(p)) => write!(f, "{} {}", c, p),
-            APat::App(c, None) => write!(f, "{}", c),
-            APat::Record(fields) => write!(
-                f,
-                "{{{}}}",
-                fields
-                    .iter()
-                    .map(|(s, p)| format!("{}: {}", s, p))
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-        }
-    }
-}
-
-impl fmt::Display for Expr {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Expr::Fail => write!(f, "raise Match"),
-            Expr::Int(i) => write!(f, "{}", i),
-            Expr::Var(s) => write!(f, "{}", s),
-            Expr::Let(s, bind, body) => write!(f, "let {} = {} in {} end", s, bind, body),
-            Expr::Case(e, fields) => write!(
-                f,
-                "case {} of\n{} end",
-                e,
-                fields
-                    .iter()
-                    .map(|(s, p)| format!("\t| {} => {}", s, p))
-                    .collect::<Vec<String>>()
-                    .join("\n")
-            ),
-            Expr::Record(fields) => write!(
-                f,
-                "{{{}}}",
-                fields
-                    .iter()
-                    .map(|(s, p)| format!("{}: {}", s, p))
-                    .collect::<Vec<String>>()
-                    .join(",")
-            ),
-        }
-    }
 }
